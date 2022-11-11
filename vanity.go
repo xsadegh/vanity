@@ -11,20 +11,28 @@ import (
 	"path"
 )
 
-const (
-	envVanityVCS    = "VANITY_VCS"
-	envVanityVCSURL = "VANITY_VCS_URL"
-)
+var tpl = template.Must(template.New("html").Parse(`<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<meta name="go-import" content="{{.Host}} {{.VCS}} {{.URL}}">
+</head>
+</html>
+`))
 
 func main() {
-	vcs := os.Getenv(envVanityVCS)
+	addr := os.Getenv("ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+
+	vcs := os.Getenv("VCS")
 	if vcs == "" {
 		vcs = "git"
 	}
-
-	vcsURL := os.Getenv(envVanityVCSURL)
-	if vcsURL == "" {
-		log.Fatalf("%s must be set, e.g. https://github.com/username", envVanityVCSURL)
+	vcsURL := os.Getenv("VCS_URL")
+	if vcs == "" {
+		log.Fatal("VCS_URL env not specified (eg: https://github.com/username)")
 	}
 
 	u, err := url.Parse(vcsURL)
@@ -33,30 +41,34 @@ func main() {
 	}
 
 	if u.Scheme != "https" {
-		log.Fatalf("%s scheme must be https", envVanityVCSURL)
+		log.Fatalf("vcs url scheme must be https")
 	}
 
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("ok"))
-	})
+	mux := http.NewServeMux()
+	mux.Handle("/healthz", health())
+	mux.Handle("/", redirectPackage(vcs, u))
 
-	http.HandleFunc("/", handler(vcs, u))
+	log.Printf("starting to listen on %s", addr)
+	if cert, key := os.Getenv("TLS_CERT"), os.Getenv("TLS_KEY"); cert != "" && key != "" {
+		err = http.ListenAndServeTLS(addr, cert, key, mux)
+	} else {
+		err = http.ListenAndServe(addr, mux)
+	}
+	if err != http.ErrServerClosed {
+		log.Fatalf("listen error: %+v", err)
+	}
 
-	log.Printf("starting web server on :8080, vcs: %s, url: %s", vcs, vcsURL)
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Printf("server shutdown successfully")
 }
 
-var tmpl = template.Must(template.New("html").Parse(`<!DOCTYPE html>
-<html>
-<head>
-<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
-<meta name="go-import" content="{{.Host}} {{.VCS}} {{.VCSURL}}">
-</head>
-</html>
-`))
+func health() http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("ok"))
+	}
+}
 
-func handler(vcs string, vcsURL *url.URL) http.HandlerFunc {
+func redirectPackage(vcs string, vcsURL *url.URL) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -65,7 +77,7 @@ func handler(vcs string, vcsURL *url.URL) http.HandlerFunc {
 
 		u, err := url.Parse(fmt.Sprintf("https://%s%s", vcsURL.Host, path.Join(vcsURL.Path, r.URL.Path)))
 		if err != nil {
-			http.Error(w, fmt.Sprintf("error building VCS URL: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("error building vcs url: %v", err), http.StatusInternalServerError)
 			return
 		}
 
@@ -75,9 +87,9 @@ func handler(vcs string, vcsURL *url.URL) http.HandlerFunc {
 		}
 
 		data := struct {
-			Host   string
-			VCS    string
-			VCSURL string
+			Host string
+			VCS  string
+			URL  string
 		}{
 			path.Join(r.Host, r.URL.Path),
 			vcs,
@@ -85,12 +97,12 @@ func handler(vcs string, vcsURL *url.URL) http.HandlerFunc {
 		}
 
 		var buf bytes.Buffer
-		if err := tmpl.Execute(&buf, &data); err != nil {
+		if err := tpl.Execute(&buf, &data); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("cache-Control", "no-store")
 		_, _ = w.Write(buf.Bytes())
 	}
 }
